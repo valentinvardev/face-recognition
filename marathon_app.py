@@ -4,16 +4,18 @@ import sys
 
 # Define the Modal image
 image = (
-    modal.Image.debian_slim()
-    # Install cv2 requirements
-    .apt_install("libgl1-mesa-glx", "libglib2.0-0")
+    modal.Image.debian_slim(python_version="3.10")
+    # Install cv2 requirements and C++ build tools for dlib/face-recognition
+    .apt_install("libgl1-mesa-glx", "libglib2.0-0", "build-essential", "cmake")
     # Install standard workflow libraries plus our new Roboflow integration
+    # Install computer vision libraries first
     .pip_install(
-        "inference-sdk",
         "face-recognition",
         "opencv-python-headless",
         "numpy"
     )
+    # Then install Roboflow SDK in a separate layer to avoid pip solver collisions
+    .pip_install("inference-sdk")
 )
 
 app = modal.App("marathon-runner-recognition", image=image)
@@ -21,7 +23,7 @@ app = modal.App("marathon-runner-recognition", image=image)
 # ========================================================
 # RELLENAR ESTOS DATOS DE ROBOFLOW PARA QUE EL CODIGO FUNCIONE
 # ========================================================
-ROBOFLOW_API_KEY = "API_KEY"
+ROBOFLOW_API_KEY = "jQkXK98EN0QpdYwAKaYF"
 ROBOFLOW_MODEL_ID = "bib-detection/5"
 # ========================================================
 

@@ -1,0 +1,42 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+ENV/
+env/
+.env.modal
+
+# Node artifacts
+node_modules/
+dist/
+.next/
+out/
+build/
+.vercel
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.sql
+
+# Logs and databases
+*.log
+db.sqlite
+prisma/db.sqlite-journal
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project specific
+build_log.txt
+marathon-web/node_modules/
+marathon-web/.next/
+marathon-web/.env
+marathon-web/generated/

@@ -1,0 +1,42 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+    provider = "prisma-client-js"
+    output   = "../generated/prisma"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+    directUrl = env("DIRECT_URL")
+}
+
+model Runner {
+    id            String      @id @default(uuid())
+    bibNumber     String?     @unique
+    faceEncoding  Json?       // Stores the 128-float array
+    clothingColor String?     // Dominant color found
+    detections    Detection[]
+    createdAt     DateTime    @default(now())
+    updatedAt     DateTime    @updatedAt
+}
+
+model Photo {
+    id         String      @id @default(uuid())
+    url        String
+    detections Detection[]
+    createdAt  DateTime    @default(now())
+}
+
+model Detection {
+    id         String   @id @default(uuid())
+    runnerId   String
+    photoId    String
+    bbox       Json     // [x1, y1, x2, y2]
+    confidence Float?
+    createdAt  DateTime @default(now())
+
+    runner Runner @relation(fields: [runnerId], references: [id], onDelete: Cascade)
+    photo  Photo  @relation(fields: [photoId], references: [id], onDelete: Cascade)
+}

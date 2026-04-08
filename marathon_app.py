@@ -12,10 +12,13 @@ image = (
     .pip_install(
         "face-recognition",
         "opencv-python-headless",
-        "numpy"
+        "numpy",
+        "torch",
+        "torchvision",
+        "easyocr"
     )
-    # Then install Roboflow SDK in a separate layer to avoid pip solver collisions
-    .pip_install("inference-sdk")
+    # Then install Roboflow SDK and FastAPI in a separate layer
+    .pip_install("inference-sdk", "fastapi[standard]")
 )
 
 app = modal.App("marathon-runner-recognition", image=image)
@@ -32,13 +35,18 @@ class MarathonPipeline:
     @modal.enter()
     def setup(self):
         """
-        Runs once per container. Initializes the HTTP client.
+        Runs once per container. Initializes the HTTP client and OCR reader.
         """
         from inference_sdk import InferenceHTTPClient
+        import easyocr
+
         self.rf_client = InferenceHTTPClient(
             api_url="https://serverless.roboflow.com",
             api_key=ROBOFLOW_API_KEY
         )
+        # Initialize OCR once (English + Numbers)
+        self.reader = easyocr.Reader(['en'], gpu=False) 
+
 
     @modal.method()
     def process_image(self, image_bytes: bytes):
@@ -59,9 +67,39 @@ class MarathonPipeline:
         except Exception as e:
             workflow_result = {"error": f"Roboflow API call failed. Did you fill out the credentials? ({e})"}
 
-        # 3. Global Face Extraction
-        # Because we don't know the exact bounding box output structure of your Roboflow Workflow,
-        # we extract faces from the whole image and bundle it with the workflow result.
+        # 3. Process Roboflow Detections for OCR
+        # We look for "Bib" class and crop for OCR
+        def get_digits(text):
+            return "".join([c for c in text if c.isdigit()])
+
+        if "predictions" in workflow_result:
+            for pred in workflow_result["predictions"]:
+                if pred["class"].lower() == "bib":
+                    # Extract crop coordinates
+                    x, y, w, h = int(pred["x"]), int(pred["y"]), int(pred["width"]), int(pred["height"])
+                    # Roboflow (x,y) is center
+                    x1, y1 = max(0, x - w//2), max(0, y - h//2)
+                    x2, y2 = min(img.shape[1], x + w//2), min(img.shape[0], y + h//2)
+                    
+                    bib_crop = img[y1:y2, x1:x2]
+                    print(f"DEBUG: Bib Crop shape: {bib_crop.shape}")
+                    if bib_crop.size > 0:
+                        # Pre-process for better OCR
+                        # 1. Resize 2x to help with small thumbnails
+                        # 2. Grayscale 
+                        gray_crop = cv2.cvtColor(bib_crop, cv2.COLOR_BGR2GRAY)
+                        resized_crop = cv2.resize(gray_crop, (0,0), fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                        
+                        ocr_result = self.reader.readtext(resized_crop)
+                        print(f"DEBUG: Raw OCR Result: {ocr_result}")
+                        # Join all detected text pieces and keep only digits
+                        full_text = " ".join([res[1] for res in ocr_result])
+                        digits = get_digits(full_text)
+                        pred["bib_text"] = digits if digits else "Unknown"
+                    else:
+                        pred["bib_text"] = "Unknown"
+
+        # 4. Global Face Extraction
         person_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         face_locations = face_recognition.face_locations(person_rgb)
         encodings = []
@@ -73,8 +111,19 @@ class MarathonPipeline:
         return {
             "roboflow_results": workflow_result,
             "faces_detected": len(face_locations),
-            "face_encodings": encodings
+            "face_encodings": encodings,
+            "face_locations": face_locations # [ (top, right, bottom, left), ... ]
         }
+
+    @modal.fastapi_endpoint(method="POST")
+    def process_image_web(self, image_data: dict):
+        """
+        Web endpoint for the T3 frontend.
+        Expects a JSON with {"image_base64": "..."}.
+        """
+        import base64
+        image_bytes = base64.b64decode(image_data["image_base64"])
+        return self.process_image.local(image_bytes)
 
 @app.local_entrypoint()
 def main(image_path: str = None):

@@ -14,7 +14,9 @@ function isFaceNearBib(faceLoc: number[], bibBbox: any): boolean {
   // Roboflow bbox: { x, y, width, height, class, ... }
   if (!bibBbox.x || !bibBbox.y) return false;
 
-  const faceCenterX = (faceLoc[3] + faceLoc[1]) / 2;
+  const faceLeft = faceLoc[3] ?? 0;
+  const faceRight = faceLoc[1] ?? 0;
+  const faceCenterX = (faceLeft + faceRight) / 2;
   const bibCenterX = bibBbox.x;
 
   // If centers are horizontally close, it's likely the same person

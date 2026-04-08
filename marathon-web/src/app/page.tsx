@@ -13,9 +13,11 @@ const SAMPLE_URLS = [
 ];
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"single" | "bulk">("single");
+  const [activeTab, setActiveTab] = useState<"single" | "bulk" | "folder">("single");
   const [image, setImage] = useState<string | null>(null);
   const [bulkUrls, setBulkUrls] = useState<string>("");
+  const [folderFiles, setFolderFiles] = useState<File[]>([]);
+  const [folderProgress, setFolderProgress] = useState<{ done: number; total: number } | null>(null);
   const [logs, setLogs] = useState<{msg: string, type: 'info' | 'success' | 'err'}[]>([]);
   const [isImporting, setIsImporting] = useState(false);
 
@@ -73,6 +75,44 @@ export default function Home() {
     setBulkUrls(SAMPLE_URLS.join("\n"));
   };
 
+  const handleFolderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []).filter(f =>
+      f.type.startsWith("image/")
+    );
+    setFolderFiles(files);
+    setFolderProgress(null);
+    addLog(`Selected ${files.length} image(s) from folder.`, "info");
+  };
+
+  const handleFolderUpload = async () => {
+    if (folderFiles.length === 0) return;
+    setIsImporting(true);
+    setLogs([]);
+    setFolderProgress({ done: 0, total: folderFiles.length });
+    addLog(`Starting folder upload: ${folderFiles.length} images...`, "info");
+
+    for (let i = 0; i < folderFiles.length; i++) {
+      const file = folderFiles[i]!;
+      addLog(`Processing (${i + 1}/${folderFiles.length}): ${file.name}`, "info");
+      try {
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve((reader.result as string).split(",")[1]!);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        const result = await processMutation.mutateAsync({ imageBase64: base64, imageUrl: file.name });
+        addLog(`Done: ${file.name} — ${result.runnersDetected} runner(s) found.`, "success");
+      } catch (err: any) {
+        addLog(`Failed: ${file.name} — ${err.message}`, "err");
+      }
+      setFolderProgress({ done: i + 1, total: folderFiles.length });
+    }
+
+    setIsImporting(false);
+    addLog("Folder upload complete.", "info");
+  };
+
   return (
     <main className="flex min-h-screen flex-col items-center bg-[#0a0a0a] text-white p-4 md:p-8 overflow-hidden relative">
       {/* Background Decor */}
@@ -89,6 +129,7 @@ export default function Home() {
           <div className="flex gap-2 bg-black/40 p-1 rounded-2xl border border-zinc-800">
              <button onClick={() => setActiveTab("single")} className={`px-5 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === "single" ? "bg-zinc-800 text-white shadow-xl" : "text-zinc-500 hover:text-white"}`}>SCANNER</button>
              <button onClick={() => setActiveTab("bulk")} className={`px-5 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === "bulk" ? "bg-zinc-800 text-white shadow-xl" : "text-zinc-500 hover:text-white"}`}>BULK IMPORT</button>
+             <button onClick={() => setActiveTab("folder")} className={`px-5 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === "folder" ? "bg-zinc-800 text-white shadow-xl" : "text-zinc-500 hover:text-white"}`}>FOLDER</button>
           </div>
           <Link href="/library" className="px-6 py-2 bg-white text-black hover:bg-zinc-200 rounded-2xl text-xs font-black transition-all">
             LIBRARY →
@@ -98,10 +139,10 @@ export default function Home() {
         {/* Hero Section */}
         <div className="text-center space-y-4 max-w-2xl mx-auto">
            <h2 className="text-5xl md:text-7xl font-black tracking-tight leading-none bg-gradient-to-b from-white to-zinc-500 bg-clip-text text-transparent">
-             {activeTab === "single" ? "INDIVIDUAL SCAN" : "DATASET IMPORT"}
+             {activeTab === "single" ? "INDIVIDUAL SCAN" : activeTab === "bulk" ? "DATASET IMPORT" : "FOLDER UPLOAD"}
            </h2>
            <p className="text-zinc-500 font-medium text-lg">
-             {activeTab === "single" ? "Identify bibs and faces from a single photograph." : "Connect a Roboflow dataset or a list of URLs to populate your library automatically."}
+             {activeTab === "single" ? "Identify bibs and faces from a single photograph." : activeTab === "bulk" ? "Connect a Roboflow dataset or a list of URLs to populate your library automatically." : "Select a local folder and process all images at once."}
            </p>
         </div>
 
@@ -128,7 +169,7 @@ export default function Home() {
                     {processMutation.isPending ? "SCANNING..." : "START RECOGNITION"}
                   </button>
                 </div>
-              ) : (
+              ) : activeTab === "bulk" ? (
                 <div className="space-y-6">
                   <div className="flex justify-between items-end">
                      <div>
@@ -139,14 +180,56 @@ export default function Home() {
                        Load Roboflow Sample
                      </button>
                   </div>
-                  <textarea 
+                  <textarea
                     value={bulkUrls}
                     onChange={(e) => setBulkUrls(e.target.value)}
-                    placeholder="https://source.roboflow.com/..." 
+                    placeholder="https://source.roboflow.com/..."
                     className="w-full h-[320px] bg-black/40 border border-zinc-800 rounded-3xl p-6 text-zinc-300 font-mono text-sm focus:outline-none focus:border-purple-500/50 transition-all resize-none shadow-inner"
                   />
                   <button onClick={handleBulkImport} disabled={isImporting || !bulkUrls} className="w-full py-5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-2xl font-black text-lg transition-all shadow-xl shadow-blue-900/20 active:scale-[0.98]">
                     {isImporting ? "IMPORTING..." : "START BULK IMPORT"}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  <label className="group relative flex flex-col items-center justify-center w-full h-[320px] border-2 border-dashed border-zinc-800 rounded-3xl cursor-pointer hover:border-green-500/50 hover:bg-green-500/5 transition-all duration-500">
+                    <div className="text-center space-y-4">
+                      <div className="w-16 h-16 bg-zinc-800 rounded-2xl mx-auto flex items-center justify-center group-hover:scale-110 transition-transform">
+                        <svg className="w-8 h-8 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+                      </div>
+                      {folderFiles.length > 0 ? (
+                        <div>
+                          <p className="text-white font-black text-lg">{folderFiles.length} images selected</p>
+                          <p className="text-zinc-500 text-xs mt-1">Click to change folder</p>
+                        </div>
+                      ) : (
+                        <p className="text-zinc-500 font-bold uppercase tracking-widest text-xs">Click to select a folder</p>
+                      )}
+                    </div>
+                    <input
+                      type="file"
+                      className="hidden"
+                      {...({ webkitdirectory: "true", directory: "true" } as any)}
+                      multiple
+                      onChange={handleFolderChange}
+                    />
+                  </label>
+                  {folderProgress && (
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-xs text-zinc-500 font-bold">
+                        <span>Progress</span>
+                        <span>{folderProgress.done} / {folderProgress.total}</span>
+                      </div>
+                      <div className="w-full bg-zinc-800 h-2 rounded-full overflow-hidden">
+                        <div
+                          className="bg-green-500 h-full rounded-full transition-all duration-300"
+                          style={{ width: `${(folderProgress.done / folderProgress.total) * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <button onClick={handleFolderUpload} disabled={isImporting || folderFiles.length === 0} className="w-full py-5 bg-green-700 hover:bg-green-600 disabled:opacity-50 rounded-2xl font-black text-lg transition-all shadow-xl shadow-green-900/20 active:scale-[0.98]">
+                    {isImporting ? "UPLOADING..." : `UPLOAD ${folderFiles.length > 0 ? folderFiles.length + " IMAGES" : "FOLDER"}`}
                   </button>
                 </div>
               )}

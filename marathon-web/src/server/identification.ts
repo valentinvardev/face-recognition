@@ -1,4 +1,5 @@
 import { db } from "~/server/db";
+import { Prisma } from "../../generated/prisma";
 
 /**
  * Calculates Euclidean Distance between two 128-dimensional face encodings.
@@ -34,12 +35,11 @@ export async function findOrCreateRunner(data: {
 
   // 2. Match by Face Similarity (if no Bib match found)
   if (!matchedRunner && data.faceEncoding) {
-    const allRunners = await db.runner.findMany({
-      where: { faceEncoding: { not: null } },
-    });
+    const allRunners = await db.runner.findMany();
 
     let minDistance = Infinity;
     for (const runner of allRunners) {
+      if (!runner.faceEncoding) continue;
       const existingEncoding = runner.faceEncoding as number[];
       const distance = calculateFaceDistance(data.faceEncoding, existingEncoding);
 
@@ -79,7 +79,7 @@ export async function findOrCreateRunner(data: {
   return await db.runner.create({
     data: {
       bibNumber: finalBibForCreate,
-      faceEncoding: data.faceEncoding || null,
+      faceEncoding: data.faceEncoding ?? Prisma.JsonNull,
       clothingColor: data.clothingColor || null,
     },
   });

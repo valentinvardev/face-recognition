@@ -3,18 +3,16 @@ import os
 
 image = (
     modal.Image.debian_slim(python_version="3.10")
-    .apt_install("libgl1-mesa-glx", "libglib2.0-0", "build-essential", "cmake", "libgomp1")
+    .apt_install("libgl1-mesa-glx", "libglib2.0-0", "build-essential", "cmake")
     .pip_install(
         "face-recognition",
         "opencv-python-headless",
         "numpy",
         "torch",
         "torchvision",
-        "paddlepaddle",
-        "paddleocr",
+        "google-cloud-vision",
     )
     .pip_install("inference-sdk", "fastapi[standard]")
-    .env({"PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True"})
 )
 
 app = modal.App("marathon-runner-recognition", image=image)
@@ -23,37 +21,45 @@ ROBOFLOW_API_KEY = "jQkXK98EN0QpdYwAKaYF"
 ROBOFLOW_MODEL_ID = "bib-detection/5"
 
 
-@app.cls()
+@app.cls(secrets=[modal.Secret.from_name("google-vision")])
 class MarathonPipeline:
     @modal.enter()
     def setup(self):
+        import json
         from inference_sdk import InferenceHTTPClient
-        from paddleocr import PaddleOCR
+        from google.cloud import vision
+        from google.oauth2 import service_account
 
         self.rf_client = InferenceHTTPClient(
             api_url="https://serverless.roboflow.com",
             api_key=ROBOFLOW_API_KEY,
         )
-        # PaddleOCR v5+ simplified API — models cached per container
-        self.ocr = PaddleOCR(lang="en")
+
+        # Load Google credentials from Modal secret
+        creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_info,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        self.vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 
     def _read_bib_number(self, bib_crop):
         """
-        Read digits from a bib crop using PaddleOCR.
-        Tries the raw color crop and a high-contrast upscaled version,
-        returns the digit string with the highest confidence.
+        Use Google Cloud Vision DOCUMENT_TEXT_DETECTION on the bib crop.
+        Tries original + high-contrast version, returns digits with best confidence.
         """
         import cv2
         import re
+        from google.cloud import vision
 
         h, w = bib_crop.shape[:2]
-        # Upscale small crops so OCR has enough resolution to work with
+        # Upscale small crops — Vision API works better with ≥200px
         scale = max(2, 300 // max(h, w, 1))
         upscaled = cv2.resize(
             bib_crop, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
         )
 
-        # Also try a high-contrast grayscale version
+        # High-contrast grayscale version
         gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
         _, contrast = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         contrast_bgr = cv2.cvtColor(contrast, cv2.COLOR_GRAY2BGR)
@@ -63,18 +69,37 @@ class MarathonPipeline:
 
         for label, img in [("color", upscaled), ("contrast", contrast_bgr)]:
             try:
-                result = self.ocr.ocr(img, cls=True)
-                if not result or not result[0]:
+                _, buf = cv2.imencode(".jpg", img)
+                image = vision.Image(content=buf.tobytes())
+                response = self.vision_client.document_text_detection(image=image)
+
+                if response.error.message:
+                    print(f"DEBUG Vision [{label}] error: {response.error.message}")
                     continue
-                for line in result[0]:
-                    _, (text, conf) = line
-                    digits = re.sub(r"[^0-9]", "", text)
-                    print(f"DEBUG [{label}]: '{text}' → '{digits}'  conf={conf:.2f}")
-                    if digits and conf > best_conf:
-                        best_conf = conf
-                        best_digits = digits
+
+                raw_text = response.full_text_annotation.text if response.full_text_annotation else ""
+                digits = re.sub(r"[^0-9]", "", raw_text)
+
+                # Estimate confidence from individual symbol scores
+                conf = 0.0
+                symbol_count = 0
+                for page in response.full_text_annotation.pages:
+                    for block in page.blocks:
+                        for para in block.paragraphs:
+                            for word in para.words:
+                                for symbol in word.symbols:
+                                    conf += symbol.confidence
+                                    symbol_count += 1
+                avg_conf = conf / symbol_count if symbol_count else 0.0
+
+                print(f"DEBUG Vision [{label}]: raw='{raw_text.strip()}' → digits='{digits}' conf={avg_conf:.2f}")
+
+                if digits and avg_conf > best_conf:
+                    best_conf = avg_conf
+                    best_digits = digits
+
             except Exception as e:
-                print(f"DEBUG [{label}] error: {e}")
+                print(f"DEBUG Vision [{label}] exception: {e}")
 
         return best_digits if best_digits and best_conf > 0.4 else "Unknown"
 
@@ -108,7 +133,6 @@ class MarathonPipeline:
                     int(pred["x"]), int(pred["y"]),
                     int(pred["width"]), int(pred["height"]),
                 )
-                # 10% padding so edge digits aren't clipped
                 pad_x, pad_y = int(w * 0.10), int(h * 0.10)
                 x1 = max(0, x - w // 2 - pad_x)
                 y1 = max(0, y - h // 2 - pad_y)

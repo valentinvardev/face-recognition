@@ -34,6 +34,9 @@ prisma/db.sqlite-journal
 .DS_Store
 Thumbs.db
 
+# Credentials
+google-credentials.json
+
 # Project specific
 build_log.txt
 marathon-web/node_modules/

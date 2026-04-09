@@ -14,6 +14,7 @@ datasource db {
 
 model Runner {
     id            String      @id @default(uuid())
+    runnerNumber  Int         @default(autoincrement())
     bibNumber     String?     @unique
     faceEncoding  Json?       // Stores the 128-float array
     clothingColor String?     // Dominant color found

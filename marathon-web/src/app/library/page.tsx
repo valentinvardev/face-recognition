@@ -64,8 +64,11 @@ export default function Library() {
               {/* Profile Header */}
               <div className="p-8 pb-0 flex justify-between items-start">
                 <div className="space-y-1">
+                  <p className="text-[10px] font-black text-zinc-600 uppercase tracking-widest">
+                    RUNNER #{runner.runnerNumber}
+                  </p>
                   <h3 className="text-3xl font-black tracking-tighter">
-                    {runner.bibNumber ? `BIB #${runner.bibNumber}` : "UNNAMED"}
+                    {runner.bibNumber ? `BIB ${runner.bibNumber}` : "NO BIB"}
                   </h3>
                   <div className="flex items-center gap-2">
                      <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>

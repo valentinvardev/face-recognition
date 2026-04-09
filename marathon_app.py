@@ -11,7 +11,7 @@ image = (
         "torch",
         "torchvision",
         # Pin PaddleOCR to v2.x — stable API (v5 broke all args)
-        "paddlepaddle==2.6.1",
+        "paddlepaddle==2.6.2",
         "paddleocr==2.7.3",
         # EasyOCR as fallback
         "easyocr",

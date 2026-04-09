@@ -3,14 +3,15 @@ import os
 
 image = (
     modal.Image.debian_slim(python_version="3.10")
-    .apt_install("libgl1-mesa-glx", "libglib2.0-0", "build-essential", "cmake")
+    .apt_install("libgl1-mesa-glx", "libglib2.0-0", "build-essential", "cmake", "libgomp1")
     .pip_install(
         "face-recognition",
         "opencv-python-headless",
         "numpy",
         "torch",
         "torchvision",
-        "easyocr",
+        "paddlepaddle",
+        "paddleocr",
     )
     .pip_install("inference-sdk", "fastapi[standard]")
 )
@@ -26,71 +27,55 @@ class MarathonPipeline:
     @modal.enter()
     def setup(self):
         from inference_sdk import InferenceHTTPClient
-        import easyocr
+        from paddleocr import PaddleOCR
 
         self.rf_client = InferenceHTTPClient(
             api_url="https://serverless.roboflow.com",
             api_key=ROBOFLOW_API_KEY,
         )
-        # gpu=False for Modal CPU containers
-        self.reader = easyocr.Reader(["en"], gpu=False)
+        # PaddleOCR downloads its models on first init — cached per container
+        self.ocr = PaddleOCR(use_angle_cls=True, lang="en", use_gpu=False, show_log=False)
 
     def _read_bib_number(self, bib_crop):
         """
-        Run multiple preprocessing pipelines on the bib crop and return the
-        digit string with the highest average OCR confidence.
-
-        Key improvements over the original:
-        - allowlist='0123456789'  → eliminates letter/number confusion (7 vs 1)
-        - 10% padding already applied before calling this method
-        - 3× upscale with cubic interpolation
-        - Denoising before thresholding
-        - Four preprocessing variants: plain, OTSU, OTSU-inverted, adaptive
-        - Confidence threshold 0.35 to drop weak guesses
+        Read digits from a bib crop using PaddleOCR.
+        Tries the raw color crop and a high-contrast upscaled version,
+        returns the digit string with the highest confidence.
         """
         import cv2
+        import re
 
-        gray = cv2.cvtColor(bib_crop, cv2.COLOR_BGR2GRAY)
-        denoised = cv2.fastNlMeansDenoising(gray, h=10)
+        h, w = bib_crop.shape[:2]
+        # Upscale small crops so OCR has enough resolution to work with
+        scale = max(2, 300 // max(h, w, 1))
+        upscaled = cv2.resize(
+            bib_crop, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
+        )
 
-        def upscale(img, scale=3):
-            return cv2.resize(
-                img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
-            )
+        # Also try a high-contrast grayscale version
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+        _, contrast = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        contrast_bgr = cv2.cvtColor(contrast, cv2.COLOR_GRAY2BGR)
 
-        up = upscale(denoised, 3)
-
-        pipelines = {
-            "plain":        upscale(gray, 3),
-            "otsu":         cv2.threshold(up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-            "otsu_inv":     cv2.threshold(up, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1],
-            "adaptive":     cv2.adaptiveThreshold(up, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2),
-        }
-
-        best_text = ""
+        best_digits = ""
         best_conf = 0.0
 
-        for name, processed in pipelines.items():
+        for label, img in [("color", upscaled), ("contrast", contrast_bgr)]:
             try:
-                ocr_result = self.reader.readtext(
-                    processed,
-                    allowlist="0123456789",  # digits only — fixes 7/1 confusion
-                    detail=1,
-                    paragraph=False,
-                )
-                hits = [(t, c) for _, t, c in ocr_result if c > 0.35 and t.strip()]
-                if not hits:
+                result = self.ocr.ocr(img, cls=True)
+                if not result or not result[0]:
                     continue
-                text = "".join(t for t, _ in hits)
-                conf = sum(c for _, c in hits) / len(hits)
-                print(f"DEBUG OCR [{name}]: '{text}'  conf={conf:.2f}")
-                if conf > best_conf and text:
-                    best_conf = conf
-                    best_text = text
+                for line in result[0]:
+                    _, (text, conf) = line
+                    digits = re.sub(r"[^0-9]", "", text)
+                    print(f"DEBUG [{label}]: '{text}' → '{digits}'  conf={conf:.2f}")
+                    if digits and conf > best_conf:
+                        best_conf = conf
+                        best_digits = digits
             except Exception as e:
-                print(f"DEBUG OCR [{name}] error: {e}")
+                print(f"DEBUG [{label}] error: {e}")
 
-        return best_text if best_text else "Unknown"
+        return best_digits if best_digits and best_conf > 0.4 else "Unknown"
 
     @modal.method()
     def process_image(self, image_bytes: bytes):
@@ -111,11 +96,9 @@ class MarathonPipeline:
             workflow_result = {"error": str(e)}
 
         if "predictions" in workflow_result:
-            # Best detections first
             workflow_result["predictions"].sort(
                 key=lambda p: p.get("confidence", 0), reverse=True
             )
-
             for pred in workflow_result["predictions"]:
                 if pred["class"].lower() != "bib":
                     continue
@@ -124,7 +107,7 @@ class MarathonPipeline:
                     int(pred["x"]), int(pred["y"]),
                     int(pred["width"]), int(pred["height"]),
                 )
-                # 10% padding so digits aren't clipped at the edges
+                # 10% padding so edge digits aren't clipped
                 pad_x, pad_y = int(w * 0.10), int(h * 0.10)
                 x1 = max(0, x - w // 2 - pad_x)
                 y1 = max(0, y - h // 2 - pad_y)
@@ -138,7 +121,6 @@ class MarathonPipeline:
 
         # --- 2. Face recognition ---
         person_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        # "hog" is faster and good enough for upright race photos
         face_locations = face_recognition.face_locations(person_rgb, model="hog")
         encodings = []
         if face_locations:
@@ -151,27 +133,18 @@ class MarathonPipeline:
             "roboflow_results": workflow_result,
             "faces_detected": len(face_locations),
             "face_encodings": encodings,
-            "face_locations": face_locations,  # [(top, right, bottom, left), ...]
+            "face_locations": face_locations,
         }
 
     @modal.fastapi_endpoint(method="POST")
     def process_image_web(self, image_data: dict):
-        """
-        Web endpoint called by the Next.js frontend.
-        Expects: {"image_base64": "..."}
-        """
         import base64
-
         image_bytes = base64.b64decode(image_data["image_base64"])
         return self.process_image.local(image_bytes)
 
 
 @app.local_entrypoint()
 def main(image_path: str = None):
-    """
-    Test locally:
-      python -m modal run marathon_app.py --image-path my_img.jpg
-    """
     if not image_path:
         print("Usage: python -m modal run marathon_app.py --image-path my_img.jpg")
         return
@@ -186,7 +159,6 @@ def main(image_path: str = None):
     results = model.process_image.remote(image_bytes)
 
     import json
-
     if "face_encodings" in results and results["face_encodings"]:
         results["face_encodings"] = f"[{len(results['face_encodings'])} encoding(s)]"
     print(json.dumps(results, indent=2))

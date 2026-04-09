@@ -13,7 +13,7 @@ function calculateFaceDistance(encoding1: number[], encoding2: number[]): number
   return Math.sqrt(sumSq);
 }
 
-const FACE_MATCH_THRESHOLD = 0.6;
+const FACE_MATCH_THRESHOLD = 0.5;
 
 export async function findOrCreateRunner(data: {
   bibNumber?: string;

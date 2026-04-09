@@ -4,7 +4,6 @@ import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
 import { env } from "~/env";
 import { findOrCreateRunner } from "~/server/identification";
 import { uploadImageBuffer } from "~/server/supabase";
-import type { PrismaClient } from "../../../../generated/prisma";
 
 /**
  * For each bib, find the face most likely to belong to the same person.
@@ -61,7 +60,7 @@ async function processResults(
   results: any,
   imageBuffer: Buffer,
   filename: string,
-  db: PrismaClient,
+  db: any,
 ) {
   const storedUrl = await uploadImageBuffer(imageBuffer, filename);
   const photo = await db.photo.create({ data: { url: storedUrl } });
@@ -89,12 +88,7 @@ async function processResults(
     const faceEncoding = faceIdx !== null ? faceEncodings[faceIdx] : undefined;
     if (faceIdx !== null) processedFaces.add(faceIdx);
 
-    // Skip if we have absolutely no identifying info
-    if (!bibNumber && !faceEncoding) {
-      console.log("Skipping bib — no readable number and no face found.");
-      continue;
-    }
-
+    // Always save when a bib is detected — even without a readable number
     const runner = await findOrCreateRunner({ bibNumber, faceEncoding });
     await db.detection.create({
       data: { runnerId: runner.id, photoId: photo.id, bbox: bib, confidence: bib.confidence },

@@ -11,6 +11,7 @@ image = (
         "torch",
         "torchvision",
         "google-cloud-vision",
+        "easyocr",
     )
     .pip_install("inference-sdk", "fastapi[standard]")
 )
@@ -43,6 +44,10 @@ class MarathonPipeline:
         )
         self.vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 
+        # EasyOCR as fallback if Google Vision billing isn't enabled
+        import easyocr
+        self.fallback_reader = easyocr.Reader(["en"], gpu=False)
+
     def _read_bib_number(self, bib_crop):
         """
         Use Google Cloud Vision DOCUMENT_TEXT_DETECTION on the bib crop.
@@ -66,6 +71,7 @@ class MarathonPipeline:
 
         best_digits = ""
         best_conf = 0.0
+        vision_failed = False
 
         for label, img in [("color", upscaled), ("contrast", contrast_bgr)]:
             try:
@@ -75,12 +81,12 @@ class MarathonPipeline:
 
                 if response.error.message:
                     print(f"DEBUG Vision [{label}] error: {response.error.message}")
+                    vision_failed = True
                     continue
 
                 raw_text = response.full_text_annotation.text if response.full_text_annotation else ""
                 digits = re.sub(r"[^0-9]", "", raw_text)
 
-                # Estimate confidence from individual symbol scores
                 conf = 0.0
                 symbol_count = 0
                 for page in response.full_text_annotation.pages:
@@ -100,8 +106,32 @@ class MarathonPipeline:
 
             except Exception as e:
                 print(f"DEBUG Vision [{label}] exception: {e}")
+                vision_failed = True
 
-        return best_digits if best_digits and best_conf > 0.4 else "Unknown"
+        if best_digits and best_conf > 0.4:
+            return best_digits
+
+        # --- Fallback: EasyOCR (used when Google Vision billing isn't active) ---
+        if vision_failed or not best_digits:
+            print("DEBUG: Falling back to EasyOCR")
+            try:
+                for label, img in [("color", upscaled), ("contrast", contrast_bgr)]:
+                    ocr_result = self.fallback_reader.readtext(
+                        img, allowlist="0123456789", detail=1, paragraph=False
+                    )
+                    hits = [(t, c) for _, t, c in ocr_result if c > 0.35 and t.strip()]
+                    if not hits:
+                        continue
+                    text = "".join(t for t, _ in hits)
+                    conf = sum(c for _, c in hits) / len(hits)
+                    print(f"DEBUG EasyOCR [{label}]: '{text}' conf={conf:.2f}")
+                    if text and conf > best_conf:
+                        best_conf = conf
+                        best_digits = text
+            except Exception as e:
+                print(f"DEBUG EasyOCR fallback error: {e}")
+
+        return best_digits if best_digits else "Unknown"
 
     @modal.method()
     def process_image(self, image_bytes: bytes):

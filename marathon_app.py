@@ -8,15 +8,11 @@ image = (
         "face-recognition",
         "opencv-python-headless",
         "numpy",
-        "torch",
-        "torchvision",
-        # Pin PaddleOCR to v2.x — stable API (v5 broke all args)
-        "paddlepaddle==2.6.2",
-        "paddleocr==2.7.3",
-        # EasyOCR as fallback
+        # EasyOCR brings its own torch — don't install torch separately to avoid conflicts
         "easyocr",
+        "inference-sdk",
+        "fastapi[standard]",
     )
-    .pip_install("inference-sdk", "fastapi[standard]")
 )
 
 app = modal.App("marathon-runner-recognition", image=image)
@@ -30,7 +26,6 @@ class MarathonPipeline:
     @modal.enter()
     def setup(self):
         from inference_sdk import InferenceHTTPClient
-        from paddleocr import PaddleOCR
         import easyocr
 
         self.rf_client = InferenceHTTPClient(
@@ -38,15 +33,7 @@ class MarathonPipeline:
             api_key=ROBOFLOW_API_KEY,
         )
 
-        # PaddleOCR v2.7 — primary OCR, best accuracy for numbers
-        self.paddle = PaddleOCR(
-            use_angle_cls=True,
-            lang="en",
-            use_gpu=False,
-            show_log=False,
-        )
-
-        # EasyOCR — fallback if PaddleOCR fails
+        # EasyOCR — digit-optimised reader
         self.easy = easyocr.Reader(["en"], gpu=False)
 
     def _preprocess(self, bib_crop):
@@ -63,28 +50,6 @@ class MarathonPipeline:
         contrast_bgr = cv2.cvtColor(contrast, cv2.COLOR_GRAY2BGR)
 
         return up, contrast_bgr
-
-    def _paddle_read(self, img):
-        """Read digits with PaddleOCR v2. Returns (digits, confidence)."""
-        import re
-
-        try:
-            result = self.paddle.ocr(img, cls=True)
-            if not result or not result[0]:
-                return "", 0.0
-
-            best_text, best_conf = "", 0.0
-            for line in result[0]:
-                _, (text, conf) = line
-                digits = re.sub(r"[^0-9]", "", text)
-                if digits and conf > best_conf:
-                    best_conf = conf
-                    best_text = digits
-
-            return best_text, best_conf
-        except Exception as e:
-            print(f"PaddleOCR error: {e}")
-            return "", 0.0
 
     def _easy_read(self, img):
         """Read digits with EasyOCR. Returns (digits, confidence)."""
@@ -103,27 +68,16 @@ class MarathonPipeline:
             return "", 0.0
 
     def _read_bib_number(self, bib_crop):
-        """
-        Try PaddleOCR (primary) then EasyOCR (fallback) on color + contrast
-        variants of the bib crop. Returns the digit string with best confidence.
-        """
+        """Run EasyOCR on color + contrast variants, return best digit string."""
         color, contrast = self._preprocess(bib_crop)
 
         best_digits, best_conf = "", 0.0
 
         for label, img in [("color", color), ("contrast", contrast)]:
-            # --- PaddleOCR ---
-            digits, conf = self._paddle_read(img)
-            print(f"Paddle [{label}]: '{digits}' conf={conf:.2f}")
+            digits, conf = self._easy_read(img)
+            print(f"EasyOCR [{label}]: '{digits}' conf={conf:.2f}")
             if digits and conf > best_conf:
                 best_conf, best_digits = conf, digits
-
-            # --- EasyOCR fallback ---
-            if not digits or conf < 0.5:
-                digits_e, conf_e = self._easy_read(img)
-                print(f"EasyOCR [{label}]: '{digits_e}' conf={conf_e:.2f}")
-                if digits_e and conf_e > best_conf:
-                    best_conf, best_digits = conf_e, digits_e
 
         result = best_digits if best_digits else "Unknown"
         print(f"Bib result: '{result}' (conf={best_conf:.2f})")

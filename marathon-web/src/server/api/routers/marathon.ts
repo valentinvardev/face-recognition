@@ -3,6 +3,7 @@ import axios from "axios";
 import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
 import { env } from "~/env";
 import { findOrCreateRunner } from "~/server/identification";
+import { uploadImageBuffer } from "~/server/supabase";
 
 /**
  * Simple heuristic to check if a face is likely part of the same person as a bib.
@@ -38,8 +39,12 @@ export const marathonRouter = createTRPCRouter({
         if (!modalResponse.ok) throw new Error("Modal API error");
         const results = await modalResponse.json();
 
+        const imageBuffer = Buffer.from(input.imageBase64, "base64");
+        const filename = input.imageUrl ?? `upload-${Date.now()}.jpg`;
+        const storedUrl = await uploadImageBuffer(imageBuffer, filename);
+
         const photo = await ctx.db.photo.create({
-          data: { url: input.imageUrl || "Upload" },
+          data: { url: storedUrl },
         });
 
         const runnersDetected = [];
@@ -111,17 +116,19 @@ export const marathonRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       // Logic same as above but with URL download
       const response = await axios.get(input.url, { responseType: 'arraybuffer' });
-      const imageBase64 = Buffer.from(response.data as ArrayBuffer).toString('base64');
-      
-      // Call the main logic (internal reuse or duplication for brevity in this simple app)
-      // I'll just duplicate for now to ensure it works immediately
+      const imageBuffer = Buffer.from(response.data as ArrayBuffer);
+      const imageBase64 = imageBuffer.toString('base64');
+
       const modalResponse = await fetch(env.NEXT_PUBLIC_MODAL_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image_base64: imageBase64 }),
       });
       const results = await modalResponse.json();
-      const photo = await ctx.db.photo.create({ data: { url: input.url } });
+
+      const filename = input.url.split("/").pop() ?? `url-${Date.now()}.jpg`;
+      const storedUrl = await uploadImageBuffer(imageBuffer, filename);
+      const photo = await ctx.db.photo.create({ data: { url: storedUrl } });
       const runnersDetected = [];
       const processedFaces = new Set<number>();
 

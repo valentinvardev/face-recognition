@@ -14,6 +14,7 @@ image = (
         "paddleocr",
     )
     .pip_install("inference-sdk", "fastapi[standard]")
+    .env({"PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True"})
 )
 
 app = modal.App("marathon-runner-recognition", image=image)
@@ -33,8 +34,8 @@ class MarathonPipeline:
             api_url="https://serverless.roboflow.com",
             api_key=ROBOFLOW_API_KEY,
         )
-        # PaddleOCR downloads its models on first init — cached per container
-        self.ocr = PaddleOCR(use_angle_cls=True, lang="en", use_gpu=False, show_log=False)
+        # PaddleOCR v5+ simplified API — models cached per container
+        self.ocr = PaddleOCR(lang="en")
 
     def _read_bib_number(self, bib_crop):
         """

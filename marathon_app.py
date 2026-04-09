@@ -3,14 +3,17 @@ import os
 
 image = (
     modal.Image.debian_slim(python_version="3.10")
-    .apt_install("libgl1-mesa-glx", "libglib2.0-0", "build-essential", "cmake")
+    .apt_install("libgl1-mesa-glx", "libglib2.0-0", "build-essential", "cmake", "libgomp1")
     .pip_install(
         "face-recognition",
         "opencv-python-headless",
         "numpy",
         "torch",
         "torchvision",
-        "google-cloud-vision",
+        # Pin PaddleOCR to v2.x — stable API (v5 broke all args)
+        "paddlepaddle==2.6.1",
+        "paddleocr==2.7.3",
+        # EasyOCR as fallback
         "easyocr",
     )
     .pip_install("inference-sdk", "fastapi[standard]")
@@ -22,116 +25,109 @@ ROBOFLOW_API_KEY = "jQkXK98EN0QpdYwAKaYF"
 ROBOFLOW_MODEL_ID = "bib-detection/5"
 
 
-@app.cls(secrets=[modal.Secret.from_name("google-vision")])
+@app.cls()
 class MarathonPipeline:
     @modal.enter()
     def setup(self):
-        import json
         from inference_sdk import InferenceHTTPClient
-        from google.cloud import vision
-        from google.oauth2 import service_account
+        from paddleocr import PaddleOCR
+        import easyocr
 
         self.rf_client = InferenceHTTPClient(
             api_url="https://serverless.roboflow.com",
             api_key=ROBOFLOW_API_KEY,
         )
 
-        # Load Google credentials from Modal secret
-        creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
-        credentials = service_account.Credentials.from_service_account_info(
-            creds_info,
-            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        # PaddleOCR v2.7 — primary OCR, best accuracy for numbers
+        self.paddle = PaddleOCR(
+            use_angle_cls=True,
+            lang="en",
+            use_gpu=False,
+            show_log=False,
         )
-        self.vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 
-        # EasyOCR as fallback if Google Vision billing isn't enabled
-        import easyocr
-        self.fallback_reader = easyocr.Reader(["en"], gpu=False)
+        # EasyOCR — fallback if PaddleOCR fails
+        self.easy = easyocr.Reader(["en"], gpu=False)
+
+    def _preprocess(self, bib_crop):
+        """Upscale + generate high-contrast variant."""
+        import cv2
+
+        h, w = bib_crop.shape[:2]
+        scale = max(2, 300 // max(h, w, 1))
+        up = cv2.resize(bib_crop, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+
+        gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)
+        denoised = cv2.fastNlMeansDenoising(gray, h=10)
+        _, contrast = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        contrast_bgr = cv2.cvtColor(contrast, cv2.COLOR_GRAY2BGR)
+
+        return up, contrast_bgr
+
+    def _paddle_read(self, img):
+        """Read digits with PaddleOCR v2. Returns (digits, confidence)."""
+        import re
+
+        try:
+            result = self.paddle.ocr(img, cls=True)
+            if not result or not result[0]:
+                return "", 0.0
+
+            best_text, best_conf = "", 0.0
+            for line in result[0]:
+                _, (text, conf) = line
+                digits = re.sub(r"[^0-9]", "", text)
+                if digits and conf > best_conf:
+                    best_conf = conf
+                    best_text = digits
+
+            return best_text, best_conf
+        except Exception as e:
+            print(f"PaddleOCR error: {e}")
+            return "", 0.0
+
+    def _easy_read(self, img):
+        """Read digits with EasyOCR. Returns (digits, confidence)."""
+        try:
+            result = self.easy.readtext(
+                img, allowlist="0123456789", detail=1, paragraph=False
+            )
+            hits = [(t, c) for _, t, c in result if c > 0.3 and t.strip()]
+            if not hits:
+                return "", 0.0
+            text = "".join(t for t, _ in hits)
+            conf = sum(c for _, c in hits) / len(hits)
+            return text, conf
+        except Exception as e:
+            print(f"EasyOCR error: {e}")
+            return "", 0.0
 
     def _read_bib_number(self, bib_crop):
         """
-        Use Google Cloud Vision DOCUMENT_TEXT_DETECTION on the bib crop.
-        Tries original + high-contrast version, returns digits with best confidence.
+        Try PaddleOCR (primary) then EasyOCR (fallback) on color + contrast
+        variants of the bib crop. Returns the digit string with best confidence.
         """
-        import cv2
-        import re
-        from google.cloud import vision
+        color, contrast = self._preprocess(bib_crop)
 
-        h, w = bib_crop.shape[:2]
-        # Upscale small crops — Vision API works better with ≥200px
-        scale = max(2, 300 // max(h, w, 1))
-        upscaled = cv2.resize(
-            bib_crop, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
-        )
+        best_digits, best_conf = "", 0.0
 
-        # High-contrast grayscale version
-        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
-        _, contrast = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        contrast_bgr = cv2.cvtColor(contrast, cv2.COLOR_GRAY2BGR)
+        for label, img in [("color", color), ("contrast", contrast)]:
+            # --- PaddleOCR ---
+            digits, conf = self._paddle_read(img)
+            print(f"Paddle [{label}]: '{digits}' conf={conf:.2f}")
+            if digits and conf > best_conf:
+                best_conf, best_digits = conf, digits
 
-        best_digits = ""
-        best_conf = 0.0
-        vision_failed = False
+            # --- EasyOCR fallback ---
+            if not digits or conf < 0.5:
+                digits_e, conf_e = self._easy_read(img)
+                print(f"EasyOCR [{label}]: '{digits_e}' conf={conf_e:.2f}")
+                if digits_e and conf_e > best_conf:
+                    best_conf, best_digits = conf_e, digits_e
 
-        for label, img in [("color", upscaled), ("contrast", contrast_bgr)]:
-            try:
-                _, buf = cv2.imencode(".jpg", img)
-                image = vision.Image(content=buf.tobytes())
-                response = self.vision_client.document_text_detection(image=image)
-
-                if response.error.message:
-                    print(f"DEBUG Vision [{label}] error: {response.error.message}")
-                    vision_failed = True
-                    continue
-
-                raw_text = response.full_text_annotation.text if response.full_text_annotation else ""
-                digits = re.sub(r"[^0-9]", "", raw_text)
-
-                conf = 0.0
-                symbol_count = 0
-                for page in response.full_text_annotation.pages:
-                    for block in page.blocks:
-                        for para in block.paragraphs:
-                            for word in para.words:
-                                for symbol in word.symbols:
-                                    conf += symbol.confidence
-                                    symbol_count += 1
-                avg_conf = conf / symbol_count if symbol_count else 0.0
-
-                print(f"DEBUG Vision [{label}]: raw='{raw_text.strip()}' → digits='{digits}' conf={avg_conf:.2f}")
-
-                if digits and avg_conf > best_conf:
-                    best_conf = avg_conf
-                    best_digits = digits
-
-            except Exception as e:
-                print(f"DEBUG Vision [{label}] exception: {e}")
-                vision_failed = True
-
-        if best_digits and best_conf > 0.4:
-            return best_digits
-
-        # --- Fallback: EasyOCR (used when Google Vision billing isn't active) ---
-        if vision_failed or not best_digits:
-            print("DEBUG: Falling back to EasyOCR")
-            try:
-                for label, img in [("color", upscaled), ("contrast", contrast_bgr)]:
-                    ocr_result = self.fallback_reader.readtext(
-                        img, allowlist="0123456789", detail=1, paragraph=False
-                    )
-                    hits = [(t, c) for _, t, c in ocr_result if c > 0.35 and t.strip()]
-                    if not hits:
-                        continue
-                    text = "".join(t for t, _ in hits)
-                    conf = sum(c for _, c in hits) / len(hits)
-                    print(f"DEBUG EasyOCR [{label}]: '{text}' conf={conf:.2f}")
-                    if text and conf > best_conf:
-                        best_conf = conf
-                        best_digits = text
-            except Exception as e:
-                print(f"DEBUG EasyOCR fallback error: {e}")
-
-        return best_digits if best_digits else "Unknown"
+        result = best_digits if best_digits else "Unknown"
+        print(f"Bib result: '{result}' (conf={best_conf:.2f})")
+        return result
 
     @modal.method()
     def process_image(self, image_bytes: bytes):
@@ -163,6 +159,7 @@ class MarathonPipeline:
                     int(pred["x"]), int(pred["y"]),
                     int(pred["width"]), int(pred["height"]),
                 )
+                # 10% padding so edge digits aren't clipped
                 pad_x, pad_y = int(w * 0.10), int(h * 0.10)
                 x1 = max(0, x - w // 2 - pad_x)
                 y1 = max(0, y - h // 2 - pad_y)

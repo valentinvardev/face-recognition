@@ -82,24 +82,36 @@ export default function Library() {
               {/* Photo Gallery Preview */}
               <div className="p-8">
                 <div className="grid grid-cols-2 gap-3 mb-6">
-                  {runner.detections.slice(0, 4).map((det) => (
-                    <div 
-                      key={det.id} 
-                      className="aspect-square bg-black rounded-3xl overflow-hidden border border-white/5 relative group/img cursor-zoom-in group"
-                      onClick={() => setSelectedImage(det.photo.url)}
+                  {runner.detections.slice(0, 4).map((det) => {
+                    const isRemoteUrl = det.photo.url.startsWith("http");
+                    return (
+                    <div
+                      key={det.id}
+                      className={`aspect-square bg-black rounded-3xl overflow-hidden border border-white/5 relative group/img ${isRemoteUrl ? "cursor-zoom-in" : "cursor-default"} group`}
+                      onClick={() => isRemoteUrl && setSelectedImage(det.photo.url)}
                     >
-                      <img 
-                        src={det.photo.url} 
-                        alt="Runner Sighting" 
-                        className="w-full h-full object-cover grayscale group-hover/img:grayscale-0 transition-all duration-700 scale-110 group-hover/img:scale-100" 
-                      />
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center">
-                         <div className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center scale-75 group-hover/img:scale-100 transition-transform">
-                            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
-                         </div>
-                      </div>
+                      {isRemoteUrl ? (
+                        <>
+                          <img
+                            src={det.photo.url}
+                            alt="Runner Sighting"
+                            className="w-full h-full object-cover grayscale group-hover/img:grayscale-0 transition-all duration-700 scale-110 group-hover/img:scale-100"
+                          />
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center">
+                             <div className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center scale-75 group-hover/img:scale-100 transition-transform">
+                                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7"/></svg>
+                             </div>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center gap-2 bg-zinc-900/60">
+                          <svg className="w-8 h-8 text-zinc-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                          <p className="text-[9px] text-zinc-700 font-bold uppercase tracking-widest text-center px-2 truncate w-full text-center">{det.photo.url}</p>
+                        </div>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                   {/* Placeholder if few photos */}
                   {Array.from({ length: Math.max(0, 4 - runner.detections.length) }).map((_, i) => (
                     <div key={i} className="aspect-square bg-zinc-800/20 rounded-3xl border border-dashed border-zinc-800 flex items-center justify-center">

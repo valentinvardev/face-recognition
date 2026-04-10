@@ -148,6 +148,78 @@ class MarathonPipeline:
         image_bytes = base64.b64decode(image_data["image_base64"])
         return self.process_image.local(image_bytes)
 
+    @modal.fastapi_endpoint(method="POST")
+    def process_and_save(self, payload: dict):
+        """
+        Download photo from Supabase, run OCR, write bib directly to DB.
+        Accepts: { storage_key, photo_id, supabase_url, supabase_service_key }
+        Returns immediately-useful status; all heavy work runs inside Modal.
+        """
+        import requests
+        import re
+
+        storage_key = payload.get("storage_key", "")
+        photo_id = payload.get("photo_id", "")
+        supabase_url = payload.get("supabase_url", "")
+        service_key = payload.get("supabase_service_key", "")
+
+        if not all([storage_key, photo_id, supabase_url, service_key]):
+            return {"error": "Missing required fields", "bib": None}
+
+        auth_headers = {
+            "Authorization": f"Bearer {service_key}",
+            "apikey": service_key,
+        }
+
+        # 1. Download photo from Supabase Storage
+        download_url = f"{supabase_url}/storage/v1/object/photos/{storage_key}"
+        try:
+            img_resp = requests.get(download_url, headers=auth_headers, timeout=30)
+            img_resp.raise_for_status()
+            image_bytes = img_resp.content
+        except Exception as e:
+            print(f"Download failed: {e}")
+            return {"error": f"Download failed: {e}", "bib": None}
+
+        # 2. Run Roboflow + OCR pipeline
+        result = self.process_image.local(image_bytes)
+
+        # 3. Extract best bib number from predictions
+        bib_number = None
+        preds = result.get("roboflow_results", {}).get("predictions", [])
+        sorted_preds = sorted(preds, key=lambda p: p.get("confidence", 0), reverse=True)
+        for pred in sorted_preds:
+            if pred.get("class", "").lower() != "bib":
+                continue
+            text = (pred.get("bib_text") or "").strip()
+            if text and text != "Unknown" and re.match(r"^\d+$", text):
+                bib_number = text
+                break
+
+        print(f"Photo {photo_id}: bib={bib_number}")
+
+        # 4. Write bib directly to Supabase DB (PostgREST)
+        if bib_number:
+            try:
+                db_resp = requests.patch(
+                    f"{supabase_url}/rest/v1/Photo",
+                    params={"id": f"eq.{photo_id}"},
+                    headers={
+                        **auth_headers,
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    json={"bibNumber": bib_number},
+                    timeout=15,
+                )
+                db_resp.raise_for_status()
+                print(f"Saved bib {bib_number} for photo {photo_id}")
+            except Exception as e:
+                print(f"DB write failed: {e}")
+                return {"error": f"DB write failed: {e}", "bib": bib_number}
+
+        return {"bib": bib_number, "photo_id": photo_id}
+
 
 @app.local_entrypoint()
 def main(image_path: str = None):
